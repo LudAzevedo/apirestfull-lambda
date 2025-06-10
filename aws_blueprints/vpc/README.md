@@ -22,9 +22,25 @@ Este módulo configura:
 | `public_subnet_cidr_block`  | O bloco CIDR para a sub-rede pública.                                     | `string` | `"10.0.1.0/24"`  | não         |
 | `private_subnet_cidr_block` | O bloco CIDR para a sub-rede privada.                                     | `string` | `"10.0.2.0/24"`  | não         |
 | `availability_zone`         | A zona de disponibilidade para as sub-redes (ex: us-east-1a, us-west-2b). | `string` | `"us-east-1a"` | não         |
+| `enable_eks_support`        | Se verdadeiro, adiciona tags às sub-redes necessárias para a integração com o Amazon EKS. | `bool`   | `false`        | não         |
+| `cluster_name`              | O nome do cluster EKS. Usado nas tags das sub-redes quando `enable_eks_support` é verdadeiro. Ex: 'meu-cluster-eks'. | `string` | `null`         | não (obrigatório se `enable_eks_support` for `true`) |
 | `tags`                      | Um mapa de tags a serem aplicadas aos recursos da VPC (VPC, Subnets, IGW, NAT GW, EIP, Route Tables). | `map(string)` | `{ Name = "MainVPC", ... }` | não         |
 
-*Nota: Tags como `Name` são definidas por padrão para os principais recursos dentro do `main.tf`. A variável `tags` pode ser usada para adicionar ou sobrescrever tags globalmente nos recursos que a suportam dentro deste módulo, embora o comportamento específico possa variar por recurso.*
+*Nota: Tags como `Name` são definidas por padrão para os principais recursos dentro do `main.tf`. A variável `tags` pode ser usada para adicionar ou sobrescrever tags. Se `enable_eks_support` for `true`, tags específicas do EKS serão mescladas com as tags existentes nas sub-redes.*
+
+### Suporte a EKS
+
+Quando a variável `enable_eks_support` é definida como `true`, as seguintes tags são adicionadas às sub-redes para permitir que o Amazon EKS as utilize para provisionar recursos de balanceamento de carga (Load Balancers):
+
+-   **Sub-rede Pública:**
+    -   `kubernetes.io/role/elb = "1"`: Indica que a sub-rede pode ser usada por Load Balancers externos do Kubernetes.
+    -   `kubernetes.io/cluster/${var.cluster_name} = "shared"`: Associa a sub-rede a um cluster EKS específico, permitindo que múltiplos clusters compartilhem a mesma VPC e sub-redes (se configurado corretamente). O `var.cluster_name` deve ser fornecido.
+
+-   **Sub-rede Privada:**
+    -   `kubernetes.io/role/internal-elb = "1"`: Indica que a sub-rede pode ser usada por Load Balancers internos do Kubernetes.
+    -   `kubernetes.io/cluster/${var.cluster_name} = "shared"`: Similar à sub-rede pública, associa a sub-rede privada ao cluster EKS especificado.
+
+É crucial fornecer um valor para `var.cluster_name` quando `enable_eks_support` é `true` para que as tags de cluster sejam corretamente aplicadas.
 
 ## Saídas (Outputs)
 
@@ -51,8 +67,12 @@ module "vpc_environment" {
   # Opcional: Personalize os blocos CIDR e a zona de disponibilidade
   # vpc_cidr_block            = "192.168.0.0/16"
   # public_subnet_cidr_block  = "192.168.1.0/24"
-  # private_subnet_cidr_block = "192.168.2.0/24"
+  # private_subnet_cidr_block = "10.10.2.0/24"
   # availability_zone         = "us-west-2a" # Verifique as AZs disponíveis na sua região
+
+  # Exemplo para habilitar suporte a EKS (requer que cluster_name seja definido)
+  # enable_eks_support = true
+  # cluster_name       = "meu-cluster-demo"
 
   tags = {
     Environment = "Production"

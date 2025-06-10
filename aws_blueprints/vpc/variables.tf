@@ -25,3 +25,17 @@ variable "availability_zone" {
   type        = string
   default     = "us-east-1a" # Escolha uma AZ padrão ou deixe em branco para exigir do usuário
 }
+
+# Variável para habilitar o suporte a EKS nas sub-redes
+variable "enable_eks_support" {
+  description = "Se verdadeiro, adiciona tags às sub-redes necessárias para a integração com o Amazon EKS."
+  type        = bool
+  default     = false
+}
+
+# Variável para o nome do cluster EKS
+variable "cluster_name" {
+  description = "O nome do cluster EKS. Usado nas tags das sub-redes quando enable_eks_support é verdadeiro. Ex: 'meu-cluster-eks'."
+  type        = string
+  default     = null # Não há um nome de cluster padrão, deve ser fornecido se enable_eks_support for true.
+}

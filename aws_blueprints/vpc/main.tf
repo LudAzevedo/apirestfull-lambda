@@ -25,9 +25,17 @@ resource "aws_subnet" "public_subnet" {
   availability_zone       = var.availability_zone
   map_public_ip_on_launch = true # Instâncias nesta sub-rede receberão IP público
 
-  tags = {
-    Name = "PublicSubnet"
-  }
+  tags = merge(
+    {
+      Name = "PublicSubnet"
+    },
+    # Tags condicionais para suporte EKS
+    # Estas tags permitem que o Kubernetes descubra automaticamente estas sub-redes para LoadBalancers (ELB/NLB).
+    var.enable_eks_support ? {
+      "kubernetes.io/role/elb" = "1" # Usado por LoadBalancers externos
+      "kubernetes.io/cluster/${var.cluster_name}" = "shared" # Associa a sub-rede a um cluster específico
+    } : {}
+  )
 }
 
 # ------------------------------------------------------------------------------
@@ -39,9 +47,17 @@ resource "aws_subnet" "private_subnet" {
   availability_zone       = var.availability_zone
   map_public_ip_on_launch = false # Instâncias nesta sub-rede NÃO receberão IP público
 
-  tags = {
-    Name = "PrivateSubnet"
-  }
+  tags = merge(
+    {
+      Name = "PrivateSubnet"
+    },
+    # Tags condicionais para suporte EKS
+    # Estas tags permitem que o Kubernetes descubra automaticamente estas sub-redes para LoadBalancers internos.
+    var.enable_eks_support ? {
+      "kubernetes.io/role/internal-elb" = "1" # Usado por LoadBalancers internos
+      "kubernetes.io/cluster/${var.cluster_name}" = "shared" # Associa a sub-rede a um cluster específico
+    } : {}
+  )
 }
 
 # ------------------------------------------------------------------------------

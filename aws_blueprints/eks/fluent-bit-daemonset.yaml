@@ -1,0 +1,239 @@
+# fluent-bit-daemonset.yaml
+# Adaptado de: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-setup-logs-FluentBit.html
+# e https://github.com/aws-samples/amazon-cloudwatch-container-insights/blob/master/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/fluent-bit/fluent-bit.yaml
+
+# Namespace para os recursos do Fluent Bit
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${FLUENT_BIT_NAMESPACE}
+  labels:
+    name: ${FLUENT_BIT_NAMESPACE}
+---
+# Service Account para o Fluent Bit
+# Anotada com a IAM Role que permite ao Fluent Bit enviar logs para o CloudWatch.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit-sa
+  namespace: ${FLUENT_BIT_NAMESPACE}
+  annotations:
+    eks.amazonaws.com/role-arn: ${FLUENT_BIT_SA_ROLE_ARN}
+---
+# ClusterRole para conceder ao Fluent Bit as permissões necessárias no cluster.
+# Permite ler metadados de pods e namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-cr
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "pods/logs"] # Adicionado pods/logs para permitir leitura de logs de pods específicos se necessário
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding para vincular a ServiceAccount fluent-bit-sa ao ClusterRole fluent-bit-cr.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-crb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-cr
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit-sa
+    namespace: ${FLUENT_BIT_NAMESPACE}
+---
+# ConfigMap contendo a configuração do Fluent Bit.
+# Define inputs, filters e outputs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: ${FLUENT_BIT_NAMESPACE}
+  labels:
+    k8s-app: fluent-bit
+data:
+  # Configuração principal do Fluent Bit
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush                     5
+        Log_Level                 info
+        Daemon                    off
+        Parsers_File              parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 2020
+        # Health check para o liveness/readiness probe
+        Health_Check              On
+        HC_Errors_Count           5
+        HC_Retry_Failure_Count    5
+        HC_Period                 10
+
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  inputs.conf: |
+    [INPUT]
+        Name                tail
+        Tag                 kube.*
+        Path                /var/log/containers/*.log
+        DB                  /var/log/flb_kube.db
+        Mem_Buf_Limit       5MB
+        Skip_Long_Lines     On
+        Refresh_Interval    10
+        # Exclui logs do próprio Fluent Bit para evitar loops
+        Exclude_Path        /var/log/containers/fluent-bit*,/var/log/containers/aws-node*,/var_log/containers/kube-proxy*
+
+  filters.conf: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+        # Annotations a serem adicionadas como campos no log, se presentes no Pod
+        # Kube_Meta_Cache_TTL 300s
+
+  outputs.conf: |
+    [OUTPUT]
+        Name                cloudwatch_logs
+        Match               kube.*
+        region              ${AWS_REGION}
+        log_group_name      ${CLOUDWATCH_LOG_GROUP_NAME}
+        log_stream_prefix   from-fluent-bit-
+        auto_create_group   true
+        # Para performance, considere ajustar retry_limit e outros parâmetros de buffer/rede.
+        # retry_limit         False # ou um número específico
+
+  parsers.conf: |
+    [PARSER]
+        Name                docker
+        Format              json
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+
+    [PARSER]
+        Name                cri
+        Format              regex
+        Regex               ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%N%z
+
+    [PARSER]
+        Name                json
+        Format              json
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+
+    # Adicione outros parsers conforme necessário para seus formatos de log de aplicação.
+
+# DaemonSet para rodar o Fluent Bit em cada nó do cluster.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: ${FLUENT_BIT_NAMESPACE}
+  labels:
+    k8s-app: fluent-bit
+    version: v1
+    kubernetes.io/cluster-service: "true"
+spec:
+  selector:
+    matchLabels:
+      k8s-app: fluent-bit
+  template:
+    metadata:
+      labels:
+        k8s-app: fluent-bit
+        version: v1
+        kubernetes.io/cluster-service: "true"
+    spec:
+      serviceAccountName: fluent-bit-sa
+      # Tolerações para rodar em todos os nós, incluindo masters (se aplicável e desejado)
+      tolerations:
+        - operator: Exists
+      # Node selector para garantir que rode em nós Linux
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Monta os volumes necessários para ler logs dos containers e do host.
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers # Ajuste se seu container runtime usar um caminho diferente
+        - name: fluent-bit-config-volume
+          configMap:
+            name: fluent-bit-config
+        # Monta o timezone do host para timestamps corretos
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+      containers:
+        - name: fluent-bit
+          # Imagem do Fluent Bit otimizada para AWS. Verifique a versão mais recente.
+          # https://hub.docker.com/r/amazon/aws-for-fluent-bit/tags
+          image: amazon/aws-for-fluent-bit:2.31.11 # Exemplo de versão, use uma estável e recente
+          imagePullPolicy: IfNotPresent
+          # Argumentos para o Fluent Bit, especificando o arquivo de configuração.
+          args:
+            - -c
+            - /fluent-bit/etc/fluent-bit.conf
+          # Variáveis de ambiente (opcional, algumas configurações podem vir de aqui)
+          # env:
+          #   - name: AWS_REGION
+          #     value: "${AWS_REGION}" # Pode ser passado aqui ou configurado no output do Fluent Bit
+          ports:
+            - containerPort: 2020 # Porta para o servidor HTTP (métricas, health check)
+          # Probes de liveness e readiness
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # Monta os volumes definidos acima no container.
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: fluent-bit-config-volume
+              mountPath: /fluent-bit/etc/
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+          # Define limites de recursos para o container do Fluent Bit.
+          # Ajuste conforme a carga e os recursos disponíveis nos seus nós.
+          resources:
+            limits:
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+      # Define o terminationGracePeriodSeconds para permitir que o Fluent Bit envie logs pendentes antes de terminar.
+      terminationGracePeriodSeconds: 60
+      # Define a prioridade do pod (opcional, mas pode ser útil para garantir que o Fluent Bit rode)
+      # priorityClassName: system-node-critical
+      # SecurityContext para o pod (opcional, mas recomendado)
+      # securityContext:
+      #   runAsUser: 0 # Fluent Bit pode precisar rodar como root para acessar logs do host
+      #   # fsGroup: ...
+---
